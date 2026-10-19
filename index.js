@@ -17,14 +17,34 @@ const { saved, save } = require('./lib/state');
 const commands = new Map(); // name or alias -> plugin
 const listeners = []; // plugins that react to plain messages (games)
 
-for (const file of fs.readdirSync(path.join(__dirname, 'plugins'))) {
+// Fixed: handles both Plugins and plugins, and creates folder if missing
+let pluginsPath = path.join(__dirname, 'plugins');
+if (!fs.existsSync(pluginsPath)) {
+  pluginsPath = path.join(__dirname, 'Plugins');
+}
+if (!fs.existsSync(pluginsPath)) {
+  pluginsPath = path.join(__dirname, 'src', 'plugins');
+}
+if (!fs.existsSync(pluginsPath)) {
+  fs.mkdirSync(path.join(__dirname, 'plugins'), { recursive: true });
+  pluginsPath = path.join(__dirname, 'plugins');
+  console.log('Created empty plugins folder at', pluginsPath);
+}
+
+console.log(`Loading plugins from: ${pluginsPath}`);
+
+for (const file of fs.readdirSync(pluginsPath)) {
   if (!file.endsWith('.js')) continue;
-  const plugin = require(path.join(__dirname, 'plugins', file));
-  if (plugin.name) {
-    commands.set(plugin.name, plugin);
-    (plugin.aliases || []).forEach((a) => commands.set(a, plugin));
+  try {
+    const plugin = require(path.join(pluginsPath, file));
+    if (plugin.name) {
+      commands.set(plugin.name, plugin);
+      (plugin.aliases || []).forEach((a) => commands.set(a, plugin));
+    }
+    if (typeof plugin.onMessage === 'function') listeners.push(plugin);
+  } catch (e) {
+    console.error(`Failed to load plugin ${file}:`, e.message);
   }
-  if (typeof plugin.onMessage === 'function') listeners.push(plugin);
 }
 
 const uniquePlugins = () => [...new Set(commands.values())];
@@ -46,6 +66,7 @@ async function start() {
   if (!sock.authState.creds.registered) {
     if (!config.PAIRING_NUMBER) {
       console.error('Set PAIRING_NUMBER (or OWNER_NUMBER) in .env first.');
+      console.error('Add PAIRING_NUMBER in Render > Environment');
       process.exit(1);
     }
     setTimeout(async () => {
