@@ -5,6 +5,7 @@ const pino = require('pino');
 const {
   default: makeWASocket,
   useMultiFileAuthState,
+  makeCacheableSignalKeyStore,
   DisconnectReason,
   fetchLatestBaileysVersion,
   Browsers,
@@ -59,17 +60,36 @@ for (const file of fs.readdirSync(pluginsPath)) {
 const uniquePlugins = () => [...new Set(commands.values())];
 
 // ---- Start the bot ----------------------------------------------------------
+let current = null; // only ever keep one live socket
+
 async function start() {
+  // Make sure an old socket can never keep running next to a new one.
+  if (current) {
+    try {
+      current.ev.removeAllListeners();
+      current.end(undefined);
+    } catch (_) {
+      /* already closed */
+    }
+    current = null;
+  }
+
+  const logger = pino({ level: 'silent' });
   const { state, saveCreds } = await useMultiFileAuthState(path.join(__dirname, 'session'));
   const { version } = await fetchLatestBaileysVersion();
 
   const sock = makeWASocket({
     version,
-    auth: state,
-    logger: pino({ level: 'silent' }),
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, logger),
+    },
+    logger,
     browser: Browsers.ubuntu('Chrome'),
     printQRInTerminal: false,
+    markOnlineOnConnect: false,
   });
+  current = sock;
 
   // First run: link with a pairing code instead of a QR.
   if (!sock.authState.creds.registered) {
@@ -99,7 +119,7 @@ async function start() {
         console.log('Logged out. Delete the "session" folder and start again.');
       } else {
         console.log('Connection closed, reconnecting...');
-        start();
+        setTimeout(start, 2000);
       }
     }
   });
@@ -127,6 +147,8 @@ async function handle(sock, m) {
   const isOwner = fromMe || numberOf(sender) === config.OWNER_NUMBER;
   const text = getText(m);
   if (!text) return;
+
+  console.log(`Message received (${isGroup ? 'group' : 'chat'}, ${fromMe ? 'from me' : 'from friend'}, ${text.startsWith(config.PREFIX) ? 'command' : 'text'})`);
 
   const reply = (t) => sock.sendMessage(jid, { text: t }, { quoted: m });
   const ctx = {
