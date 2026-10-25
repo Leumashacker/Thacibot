@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 const pino = require('pino');
 const {
   default: makeWASocket,
@@ -12,6 +13,14 @@ const {
 const config = require('./config');
 const { getText, numberOf } = require('./lib/utils');
 const { saved, save } = require('./lib/state');
+
+// ---- Tiny web server so Render (web service) sees an open port --------------
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end(`${config.BOT_NAME} is running`);
+  })
+  .listen(process.env.PORT || 3000, () => console.log('Web server listening'));
 
 // ---- Load plugins (every file in /plugins is one feature) -------------------
 const commands = new Map(); // name or alias -> plugin
