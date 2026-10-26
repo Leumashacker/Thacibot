@@ -15,6 +15,26 @@ const config = require('./config');
 const { getText, numberOf } = require('./lib/utils');
 const { saved, save } = require('./lib/state');
 
+// ---- Safety settings (change them in Render > Environment) -----------------
+const REPLY_DELAY_MS = Number(process.env.REPLY_DELAY_MS || 3000); // base wait before each reply
+const REPLY_JITTER_MS = Number(process.env.REPLY_JITTER_MS || 1500); // random extra wait
+const MAX_REPLIES_PER_HOUR = Number(process.env.MAX_REPLIES_PER_HOUR || 30); // per chat, owner excluded
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const hits = new Map(); // chat id -> timestamps of recent bot replies
+
+function replyAllowed(jid) {
+  const now = Date.now();
+  const list = (hits.get(jid) || []).filter((t) => now - t < 3600 * 1000);
+  if (list.length >= MAX_REPLIES_PER_HOUR) {
+    hits.set(jid, list);
+    return false;
+  }
+  list.push(now);
+  hits.set(jid, list);
+  return true;
+}
+
 // ---- Tiny web server so Render (web service) sees an open port --------------
 http
   .createServer((req, res) => {
@@ -150,7 +170,22 @@ async function handle(sock, m) {
 
   console.log(`Message received (${isGroup ? 'group' : 'chat'}, ${fromMe ? 'from me' : 'from friend'}, ${text.startsWith(config.PREFIX) ? 'command' : 'text'})`);
 
-  const reply = (t) => sock.sendMessage(jid, { text: t }, { quoted: m });
+  // Every reply waits a few seconds and shows "typing..." first, and each chat has an hourly limit.
+  const reply = async (t) => {
+    if (!isOwner && !replyAllowed(jid)) return;
+    try {
+      await sock.sendPresenceUpdate('composing', jid);
+    } catch (_) {
+      /* not critical */
+    }
+    await sleep(REPLY_DELAY_MS + Math.random() * REPLY_JITTER_MS);
+    try {
+      await sock.sendPresenceUpdate('paused', jid);
+    } catch (_) {
+      /* not critical */
+    }
+    return sock.sendMessage(jid, { text: t }, { quoted: m });
+  };
   const ctx = {
     sock, m, jid, sender, text, isGroup, fromMe, isOwner, reply, config,
     commands: uniquePlugins(),
@@ -183,7 +218,7 @@ async function handle(sock, m) {
       save();
       const msg =
         saved.awayMsg ||
-        `Hey! 👋 ${config.OWNER_NAME} is offline right now, but I'm *${config.BOT_NAME}* and I'll keep you company.\n\nTry:\n• ${config.PREFIX}menu - see everything I can do\n• ${config.PREFIX}story - an adventure where you choose\n• ${config.PREFIX}ttt - tic tac toe\n• ${config.PREFIX}guess - guess my number`;
+        `Hey! 👋 ${config.OWNER_NAME} is offline right now, but I'm *${config.BOT_NAME}* and I'll keep you company.\n\nTry:\n• ${config.PREFIX}menu - see everything I can do\n• ${config.PREFIX}story - an adventure where you choose\n• ${config.PREFIX}ttt - tic tac toe\n• ${config.PREFIX}guess - guess my number\n• ${config.PREFIX}wyr - would you rather`;
       await reply(msg);
     }
   }
