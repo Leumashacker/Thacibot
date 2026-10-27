@@ -16,6 +16,7 @@ const { getText, numberOf } = require('./lib/utils');
 const { saved, save } = require('./lib/state');
 const { awayWelcome } = require('./lib/style');
 const { useSupabaseAuthState } = require('./lib/supaAuth');
+const usage = require('./lib/usage');
 
 // ---- Safety settings (change them in Render > Environment) -----------------
 const REPLY_DELAY_MS = Number(process.env.REPLY_DELAY_MS || 3000); // base wait before each reply
@@ -205,6 +206,13 @@ async function handle(sock, m) {
   const cmd = text.startsWith(config.PREFIX) ? `command ${text.slice(config.PREFIX.length).trim().split(/\s+/)[0].toLowerCase()}` : 'text';
   console.log(`Message received (${isGroup ? 'group' : 'chat'}, ${fromMe ? 'from me' : 'from friend'}, ${cmd})${who}`);
 
+  // Remember who is using the bot (counts only, the .users command shows it to you).
+  if (!fromMe) {
+    const typed = text.startsWith(config.PREFIX) ? text.slice(config.PREFIX.length).trim().split(/\s+/)[0].toLowerCase() : '';
+    const known = typed && commands.has(typed) ? commands.get(typed).name : null;
+    usage.record({ id: sender, name: m.pushName, number: numberOf(sender), isGroup, cmd: known });
+  }
+
   // Every reply waits a few seconds and shows "typing..." first, and each chat has an hourly limit.
   const reply = async (t) => {
     if (!isOwner && !replyAllowed(jid)) return;
@@ -257,4 +265,5 @@ async function handle(sock, m) {
   }
 }
 
+usage.load();
 start();
