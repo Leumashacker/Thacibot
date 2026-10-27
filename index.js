@@ -265,5 +265,10 @@ async function handle(sock, m) {
   }
 }
 
+// On Render a redeploy runs the old and the new copy side by side for a few seconds.
+// Two copies sharing one WhatsApp login corrupt each other's encryption state, so the new
+// copy waits until the old one has been shut down before it connects.
+const START_DELAY_MS = SESSION_URL && BOT_SECRET ? Number(process.env.START_DELAY_MS || 30000) : 0;
 usage.load();
-start();
+console.log(`Waiting ${Math.round(START_DELAY_MS / 1000)}s so any old copy shuts down first...`);
+sleep(START_DELAY_MS).then(start);
