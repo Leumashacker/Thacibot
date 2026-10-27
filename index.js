@@ -15,11 +15,17 @@ const config = require('./config');
 const { getText, numberOf } = require('./lib/utils');
 const { saved, save } = require('./lib/state');
 const { awayWelcome } = require('./lib/style');
+const { useSupabaseAuthState } = require('./lib/supaAuth');
 
 // ---- Safety settings (change them in Render > Environment) -----------------
 const REPLY_DELAY_MS = Number(process.env.REPLY_DELAY_MS || 3000); // base wait before each reply
 const REPLY_JITTER_MS = Number(process.env.REPLY_JITTER_MS || 1500); // random extra wait
 const MAX_REPLIES_PER_HOUR = Number(process.env.MAX_REPLIES_PER_HOUR || 30); // per chat, owner excluded
+
+// ---- Where the WhatsApp login is kept ---------------------------------------
+// With SESSION_URL + BOT_SECRET set, the login lives in Supabase and survives restarts.
+const SESSION_URL = process.env.SESSION_URL;
+const BOT_SECRET = process.env.BOT_SECRET;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const hits = new Map(); // chat id -> timestamps of recent bot replies
@@ -96,7 +102,23 @@ async function start() {
   }
 
   const logger = pino({ level: 'silent' });
-  const { state, saveCreds } = await useMultiFileAuthState(path.join(__dirname, 'session'));
+
+  let state;
+  let saveCreds;
+  let clearSession = null;
+  if (SESSION_URL && BOT_SECRET) {
+    try {
+      ({ state, saveCreds, clear: clearSession } = await useSupabaseAuthState(SESSION_URL, BOT_SECRET));
+    } catch (e) {
+      // Never fall back to a throwaway login here: that would hide the problem and burn pairing codes.
+      console.error('Could not reach the Supabase session store, retrying in 10s:', e.message);
+      setTimeout(start, 10000);
+      return;
+    }
+  } else {
+    console.log('SESSION_URL/BOT_SECRET not set: keeping the login on local disk (lost on restart).');
+    ({ state, saveCreds } = await useMultiFileAuthState(path.join(__dirname, 'session')));
+  }
   const { version } = await fetchLatestBaileysVersion();
 
   const sock = makeWASocket({
@@ -132,12 +154,22 @@ async function start() {
 
   sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('connection.update', ({ connection, lastDisconnect }) => {
+  sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
     if (connection === 'open') console.log(`✅ ${config.BOT_NAME} is online`);
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode;
       if (code === DisconnectReason.loggedOut) {
-        console.log('Logged out. Delete the "session" folder and start again.');
+        if (clearSession) {
+          console.log('Logged out from WhatsApp. Clearing the saved login and asking for a new pairing code...');
+          try {
+            await clearSession();
+          } catch (e) {
+            console.error('Could not clear saved login:', e.message);
+          }
+          setTimeout(start, 2000);
+        } else {
+          console.log('Logged out. Delete the "session" folder and start again.');
+        }
       } else {
         console.log('Connection closed, reconnecting...');
         setTimeout(start, 2000);
@@ -169,7 +201,9 @@ async function handle(sock, m) {
   const text = getText(m);
   if (!text) return;
 
-  console.log(`Message received (${isGroup ? 'group' : 'chat'}, ${fromMe ? 'from me' : 'from friend'}, ${text.startsWith(config.PREFIX) ? 'command' : 'text'})`);
+  const who = fromMe ? '' : ` | ${m.pushName || 'unknown'} (${numberOf(sender)})`;
+  const cmd = text.startsWith(config.PREFIX) ? `command ${text.slice(config.PREFIX.length).trim().split(/\s+/)[0].toLowerCase()}` : 'text';
+  console.log(`Message received (${isGroup ? 'group' : 'chat'}, ${fromMe ? 'from me' : 'from friend'}, ${cmd})${who}`);
 
   // Every reply waits a few seconds and shows "typing..." first, and each chat has an hourly limit.
   const reply = async (t) => {
