@@ -14,6 +14,7 @@ const {
 const config = require('./config');
 const { getText, numberOf } = require('./lib/utils');
 const { saved, save } = require('./lib/state');
+const { awayWelcome } = require('./lib/style');
 
 // ---- Safety settings (change them in Render > Environment) -----------------
 const REPLY_DELAY_MS = Number(process.env.REPLY_DELAY_MS || 3000); // base wait before each reply
@@ -216,9 +217,7 @@ async function handle(sock, m) {
     if (Date.now() - last > waitMs) {
       saved.greeted[jid] = Date.now();
       save();
-      const msg =
-        saved.awayMsg ||
-        `Hey! 👋 ${config.OWNER_NAME} is offline right now, but I'm *${config.BOT_NAME}* and I'll keep you company.\n\nTry:\n• ${config.PREFIX}menu - see everything I can do\n• ${config.PREFIX}story - an adventure where you choose\n• ${config.PREFIX}ttt - tic tac toe\n• ${config.PREFIX}guess - guess my number\n• ${config.PREFIX}wyr - would you rather`;
+      const msg = saved.awayMsg || awayWelcome(config);
       await reply(msg);
     }
   }
