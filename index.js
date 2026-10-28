@@ -8,6 +8,7 @@ const {
   makeCacheableSignalKeyStore,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  downloadMediaMessage,
   Browsers,
 } = require('@whiskeysockets/baileys');
 
@@ -23,6 +24,8 @@ const usage = require('./lib/usage');
 const REPLY_DELAY_MS = Number(process.env.REPLY_DELAY_MS || 3000); // base wait before each reply
 const REPLY_JITTER_MS = Number(process.env.REPLY_JITTER_MS || 1500); // random extra wait
 const MAX_REPLIES_PER_HOUR = Number(process.env.MAX_REPLIES_PER_HOUR || 30); // per chat, owner excluded
+const MAX_MEDIA_BYTES = 4 * 1024 * 1024; // voice notes and photos bigger than this are ignored
+const URGENT_RE = /\b(emergency|urgent|accident|hospital|help me|please help|call me asap|stranded|robbed|kidnapp?ed|arrested|on fire)\b/i;
 
 // ---- Where the WhatsApp login is kept ---------------------------------------
 // With SESSION_URL + BOT_SECRET set, the login lives in Supabase and survives restarts.
@@ -31,6 +34,7 @@ const BOT_SECRET = process.env.BOT_SECRET;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const hits = new Map(); // chat id -> timestamps of recent bot replies
+const alerted = new Map(); // chat id -> time of the last urgent alert sent to the owner
 
 function replyAllowed(jid) {
   const now = Date.now();
@@ -191,6 +195,41 @@ async function start() {
   });
 }
 
+// Download a voice note or photo so the AI can listen to it / look at it.
+async function grabMedia(sock, m, body) {
+  const kind = body.audioMessage ? 'audio' : body.imageMessage ? 'image' : null;
+  if (!kind) return null;
+  const info = body.audioMessage || body.imageMessage;
+  if (Number(info.fileLength || 0) > MAX_MEDIA_BYTES) return null;
+  try {
+    const buf = await downloadMediaMessage(m, 'buffer', {}, {
+      logger: pino({ level: 'silent' }),
+      reuploadRequest: sock.updateMediaMessage,
+    });
+    if (!buf || buf.length > MAX_MEDIA_BYTES) return null;
+    const mimeType = kind === 'audio' ? 'audio/ogg' : String(info.mimetype || 'image/jpeg').split(';')[0];
+    return { kind, mimeType, data: buf.toString('base64') };
+  } catch (e) {
+    console.error('Could not download media:', e.message);
+    return null;
+  }
+}
+
+// Tell the owner privately when a friend writes something urgent (at most once per 10 minutes per chat).
+async function alertOwner(sock, jid, name, number, text) {
+  if (!config.OWNER_NUMBER) return;
+  const now = Date.now();
+  if (now - (alerted.get(jid) || 0) < 10 * 60 * 1000) return;
+  alerted.set(jid, now);
+  try {
+    await sock.sendMessage(`${config.OWNER_NUMBER}@s.whatsapp.net`, {
+      text: `🚨 *Urgent?* ${name || 'Someone'} (${number}) wrote:\n"${String(text || 'a voice note or photo').slice(0, 300)}"`,
+    });
+  } catch (e) {
+    console.error('Could not alert the owner:', e.message);
+  }
+}
+
 async function handle(sock, m) {
   if (!m.message || m.message.protocolMessage) return;
   const jid = m.key.remoteJid;
@@ -199,19 +238,23 @@ async function handle(sock, m) {
   const fromMe = !!m.key.fromMe;
   const isGroup = jid.endsWith('@g.us');
   const sender = fromMe ? sock.user.id : m.key.participant || jid;
-  const isOwner = fromMe || numberOf(sender) === config.OWNER_NUMBER;
+  const ownerLid = numberOf(sock.authState?.creds?.me?.lid || sock.user?.lid || '');
+  const senderNumber = numberOf(sender);
+  const isOwner = fromMe || senderNumber === config.OWNER_NUMBER || (!!ownerLid && senderNumber === ownerLid);
   const text = getText(m);
-  if (!text) return;
+  const body = m.message.ephemeralMessage?.message || m.message.viewOnceMessage?.message || m.message;
+  const hasMedia = !!(body.audioMessage || body.imageMessage);
+  if (!text && !hasMedia) return;
 
-  const who = fromMe ? '' : ` | ${m.pushName || 'unknown'} (${numberOf(sender)})`;
-  const cmd = text.startsWith(config.PREFIX) ? `command ${text.slice(config.PREFIX.length).trim().split(/\s+/)[0].toLowerCase()}` : 'text';
+  const who = fromMe ? '' : ` | ${m.pushName || 'unknown'} (${senderNumber})`;
+  const cmd = text.startsWith(config.PREFIX) ? `command ${text.slice(config.PREFIX.length).trim().split(/\s+/)[0].toLowerCase()}` : text ? 'text' : 'media';
   console.log(`Message received (${isGroup ? 'group' : 'chat'}, ${fromMe ? 'from me' : 'from friend'}, ${cmd})${who}`);
 
   // Remember who is using the bot (counts only, the .users command shows it to you).
   if (!fromMe) {
     const typed = text.startsWith(config.PREFIX) ? text.slice(config.PREFIX.length).trim().split(/\s+/)[0].toLowerCase() : '';
     const known = typed && commands.has(typed) ? commands.get(typed).name : null;
-    usage.record({ id: sender, name: m.pushName, number: numberOf(sender), isGroup, cmd: known });
+    usage.record({ id: sender, name: m.pushName, number: senderNumber, isGroup, cmd: known });
   }
 
   // Every reply waits a few seconds and shows "typing..." first, and each chat has an hourly limit.
@@ -249,8 +292,10 @@ async function handle(sock, m) {
   if (fromMe) return;
 
   // 2) An ongoing game / story waiting for an answer
-  for (const p of listeners) {
-    if (await p.onMessage(ctx)) return;
+  if (text) {
+    for (const p of listeners) {
+      if (await p.onMessage(ctx)) return;
+    }
   }
 
   // 3) Away mode: greet friends who text while you're offline
@@ -263,19 +308,32 @@ async function handle(sock, m) {
       save();
     }
 
+    // Keep a short in-memory note of what they said (used by the .summary command, never saved to disk).
+    ai.note(jid, m.pushName, 'friend', text || (body.audioMessage ? '(voice note)' : '(photo)'));
+
     // Your own welcome text (set with .away msg) is sent once; after that, and by default, the AI chats.
     const customWelcome = first && saved.awayMsg;
-    let answer = null;
+    let result = null;
     if (!customWelcome && saved.ai && ai.enabled) {
-      answer = await ai.reply({
+      const media = hasMedia ? await grabMedia(sock, m, body) : null;
+      result = await ai.reply({
         jid,
         name: m.pushName,
         text,
+        media,
         ownerName: config.OWNER_NAME,
         botName: config.BOT_NAME,
         persona: saved.aiPersona,
+        style: saved.aiStyle,
       });
     }
+
+    // Urgent things (emergency words, or the AI thinks so) are forwarded to you right away.
+    const urgent = (!!text && URGENT_RE.test(text)) || !!result?.urgent;
+    if (urgent) await alertOwner(sock, jid, m.pushName, senderNumber, text);
+
+    let answer = result?.text || null;
+    if (answer && urgent) answer += `\n\n🚨 I have flagged this as urgent for ${config.OWNER_NAME}.`;
     if (answer) {
       await reply(first ? `${answer}\n\n🎮 Send *${config.PREFIX}menu* to play games while you wait` : answer);
     } else if (first) {
