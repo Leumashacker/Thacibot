@@ -13,7 +13,8 @@ const {
 
 const config = require('./config');
 const { getText, numberOf } = require('./lib/utils');
-const { saved, save } = require('./lib/state');
+const { saved, save, load: loadState } = require('./lib/state');
+const ai = require('./lib/ai');
 const { awayWelcome } = require('./lib/style');
 const { useSupabaseAuthState } = require('./lib/supaAuth');
 const usage = require('./lib/usage');
@@ -256,11 +257,29 @@ async function handle(sock, m) {
   if (saved.away && !isGroup) {
     const last = saved.greeted[jid] || 0;
     const waitMs = config.AWAY_COOLDOWN_HOURS * 3600 * 1000;
-    if (Date.now() - last > waitMs) {
+    const first = Date.now() - last > waitMs;
+    if (first) {
       saved.greeted[jid] = Date.now();
       save();
-      const msg = saved.awayMsg || awayWelcome(config);
-      await reply(msg);
+    }
+
+    // Your own welcome text (set with .away msg) is sent once; after that, and by default, the AI chats.
+    const customWelcome = first && saved.awayMsg;
+    let answer = null;
+    if (!customWelcome && saved.ai && ai.enabled) {
+      answer = await ai.reply({
+        jid,
+        name: m.pushName,
+        text,
+        ownerName: config.OWNER_NAME,
+        botName: config.BOT_NAME,
+        persona: saved.aiPersona,
+      });
+    }
+    if (answer) {
+      await reply(first ? `${answer}\n\n🎮 Send *${config.PREFIX}menu* to play games while you wait` : answer);
+    } else if (first) {
+      await reply(saved.awayMsg || awayWelcome(config));
     }
   }
 }
@@ -269,6 +288,8 @@ async function handle(sock, m) {
 // Two copies sharing one WhatsApp login corrupt each other's encryption state, so the new
 // copy waits until the old one has been shut down before it connects.
 const START_DELAY_MS = SESSION_URL && BOT_SECRET ? Number(process.env.START_DELAY_MS || 30000) : 0;
-usage.load();
 console.log(`Waiting ${Math.round(START_DELAY_MS / 1000)}s so any old copy shuts down first...`);
-sleep(START_DELAY_MS).then(start);
+console.log(ai.enabled ? 'AI chat is available (AI_KEY found)' : 'AI chat is off (no AI_KEY set)');
+Promise.all([usage.load(), loadState()])
+  .then(() => sleep(START_DELAY_MS))
+  .then(start);
