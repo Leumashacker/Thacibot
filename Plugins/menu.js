@@ -4,8 +4,9 @@ const { greeting, box } = require('../lib/style');
 const CATEGORIES = [
   ['🎮 GAMES', ['guess', 'ttt', 'hangman', 'scramble', 'trivia', 'riddle', 'rps', 'wyr', 'dice']],
   ['📖 STORIES', ['story']],
+  ['🧠 AI', ['aigame', 'translate', 'define', 'explain', 'homework', 'quote', 'fact']],
   ['🎉 FUN', ['tod', '8ball']],
-  ['🛠️ TOOLS', ['ping', 'menu']],
+  ['🛠️ TOOLS', ['ping', 'status', 'menu']],
 ];
 
 const SHORT = {
@@ -21,9 +22,20 @@ const SHORT = {
   story: 'choose your adventure',
   tod: 'truth or dare',
   '8ball': 'magic 8-ball and coin flip',
+  aigame: '20q | adventure | quiz (AI games)',
+  translate: 'translate to any language',
+  define: 'meaning of a word',
+  explain: 'explain anything simply',
+  homework: 'step-by-step homework help',
+  quote: 'a fresh motivational quote',
+  fact: 'a surprising fact',
   ping: 'check if I am awake',
+  status: 'uptime and health',
   menu: 'show this menu',
   away: 'on | off | msg <text>',
+  ai: 'on | off | persona | style | forget',
+  summary: 'who texted while you were away',
+  users: 'who uses the bot',
 };
 
 const TIPS = [
@@ -31,6 +43,8 @@ const TIPS = [
   'Try *.wyr* and see what other players chose!',
   'Send *.riddle hint* if a riddle has you stuck.',
   'Beat me at *.ttt* if you can 😏',
+  'Try *.aigame 20q*: think of something and I will guess it!',
+  'Need a word in another language? *.translate sw good morning*',
   'Games work best one at a time, finish one before starting another.',
 ];
 
